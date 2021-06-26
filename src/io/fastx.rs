@@ -187,17 +187,6 @@ macro_rules! passthrough {
     };
 }
 
-macro_rules! matchthrough {
-    ($name:ident, $t:ty) => {
-        fn $name(&self) -> $t {
-            match self {
-                EitherRecord::FASTA(f) => Record::$name(f),
-                EitherRecord::FASTQ(f) => Record::$name(f),
-            }
-        }
-    };
-}
-
 pub trait Record {
     fn is_empty(&self) -> bool;
     fn check(&self) -> Result<(), &str>;
@@ -240,23 +229,39 @@ impl Record for super::fastq::Record {
     }
 }
 
-#[derive(Clone, Display, Debug, Serialize, Deserialize)]
-pub enum EitherRecord {
-    FASTA(fasta::Record),
-    FASTQ(fastq::Record),
+// A record that may be either a FASTA or FASTQ record
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct EitherRecord {
+    id: String,
+    desc: Option<String>,
+    seq: String,
+    qual: Option<String>,
 }
 
 impl EitherRecord {
+    pub fn with_attrs(id: &str, desc: Option<&str>, seq: TextSlice<'_>, qual: Option<&[u8]>) -> Self {
+        let desc = match desc {
+            Some(desc) => Some(desc.to_owned()),
+            _ => None,
+        };
+        EitherRecord {
+            id: id.to_owned(),
+            desc,
+            seq: String::from_utf8(seq.to_vec()).unwrap(),
+            qual: qual.map(|q| String::from_utf8(q.to_vec()).unwrap()),
+        }
+    }
+
     pub fn to_fasta(self) -> fasta::Record {
         return self.into();
     }
 
     pub fn to_fastq(self, default_qual: u8) -> fastq::Record {
-        match self {
-            EitherRecord::FASTQ(f) => f,
-            EitherRecord::FASTA(f) => {
-                let qual = &vec![default_qual; f.seq().len()];
-                fastq::Record::with_attrs(f.id(), f.desc(), f.seq(), qual)
+        match self.qual() {
+            Some(qual) => fastq::Record::with_attrs(self.id(), self.desc(), self.seq(), qual),
+            None => {
+                let qual = &vec![default_qual; self.seq().len()];
+                fastq::Record::with_attrs(self.id(), self.desc(), self.seq(), qual)
             }
         }
     }
@@ -264,40 +269,81 @@ impl EitherRecord {
 
 impl Into<fasta::Record> for EitherRecord {
     fn into(self) -> fasta::Record {
-        match self {
-            EitherRecord::FASTA(f) => f,
-            EitherRecord::FASTQ(f) => fasta::Record::with_attrs(f.id(), f.desc(), f.seq()),
-        }
+        fasta::Record::with_attrs(self.id(), self.desc(), self.seq())
     }
 }
 
 impl From<fasta::Record> for EitherRecord {
     fn from(record: fasta::Record) -> Self {
-        EitherRecord::FASTA(record)
+        EitherRecord {
+            id: record.id().to_owned(),
+            desc: record.desc().map(|s| s.to_owned()),
+            seq: String::from_utf8(record.seq().to_owned()).unwrap(),
+            qual: None,
+        }
     }
 }
 
 impl From<fastq::Record> for EitherRecord {
     fn from(record: fastq::Record) -> Self {
-        EitherRecord::FASTQ(record)
+        EitherRecord {
+            id: record.id().to_owned(),
+            desc: record.desc().map(|s| s.to_owned()),
+            seq: String::from_utf8(record.seq().to_owned()).unwrap(),
+            qual: Some(String::from_utf8(record.qual().to_owned()).unwrap()),
+        }
     }
 }
 
 impl Record for EitherRecord {
-    matchthrough!(is_empty, bool);
-    matchthrough!(check, Result<(), &str>);
-    matchthrough!(id, &str);
-    matchthrough!(desc, Option<&str>);
-    matchthrough!(seq, TextSlice<'_>);
+    fn is_empty(&self) -> bool {
+        self.id.is_empty() && self.desc.is_none() && self.seq.is_empty() && self.qual.as_ref().map_or(true, |qual| qual.is_empty())
+    }
 
-    fn qual(&self) -> Option<&[u8]> {
-        match &self {
-            EitherRecord::FASTA(f) => Record::qual(f),
-            EitherRecord::FASTQ(f) => Record::qual(f),
+    fn check(&self) -> Result<(), &str> {
+        if self.id().is_empty() {
+            return Err("Expecting id for FastQ record.");
+        }
+        if !self.seq.is_ascii() {
+            return Err("Non-ascii character found in sequence.");
+        }
+        if let Some(qual) = self.qual() {
+            if !qual.is_ascii() {
+                return Err("Non-ascii character found in qualities.");
+            }
+            if self.seq().len() != qual.len() {
+                return Err("Unequal length of sequence an qualities.");
+            }
+        }
+
+        Ok(())
+    }
+
+    fn id(&self) -> &str {
+        self.id.as_ref()
+    }
+
+    fn desc(&self) -> Option<&str> {
+        match self.desc.as_ref() {
+            Some(desc) => Some(&desc),
+            None => None,
         }
     }
 
-    matchthrough!(kind, Kind);
+    fn seq(&self) -> TextSlice<'_> {
+        self.seq.trim_end().as_bytes()
+    }
+
+    fn qual(&self) -> Option<&[u8]> {
+        self.qual.as_ref().map(|qual| qual.trim_end().as_bytes())
+    }
+
+    fn kind(&self) -> Kind {
+        match self.qual {
+            Some(_) => Kind::FASTQ,
+            None => Kind::FASTA,
+        }
+    }
 }
 
 pub trait Records<R: Record, E>: Iterator<Item = Result<R, E>> {}
@@ -376,10 +422,10 @@ impl<R: Read> Iterator for EitherRecords<R> {
         match &mut self.records {
             Some(EitherRecordsInner::FASTA(r)) => r
                 .next()
-                .map(|record_res| record_res.map(EitherRecord::FASTA).map_err(Error::IO)),
+                .map(|record_res| record_res.map(EitherRecord::from).map_err(Error::IO)),
             Some(EitherRecordsInner::FASTQ(r)) => r
                 .next()
-                .map(|record_res| record_res.map(EitherRecord::FASTQ).map_err(Error::FASTQ)),
+                .map(|record_res| record_res.map(EitherRecord::from).map_err(Error::FASTQ)),
             None => None,
         }
     }
@@ -639,7 +685,7 @@ ACCGTAGGCTGA
 
     #[test]
     fn test_fasta_either_record() {
-        let record = EitherRecord::FASTA(fasta::Record::with_attrs("id", Some("desc"), b"ACTG"));
+        let record = EitherRecord::with_attrs("id", Some("desc"), b"ACTG", None);
         assert!(matches!(record.kind(), Kind::FASTA));
         assert!(matches!(record.qual(), None));
         let fastq = record.clone().to_fastq(b'I');
@@ -651,12 +697,12 @@ ACCGTAGGCTGA
 
     #[test]
     fn test_fastq_either_record() {
-        let record = EitherRecord::FASTQ(fastq::Record::with_attrs(
+        let record = EitherRecord::with_attrs(
             "id",
             Some("desc"),
             b"ACTG",
-            b"JJJJ",
-        ));
+            Some(b"JJJJ"),
+        );
         assert!(matches!(record.kind(), Kind::FASTQ));
         assert!(matches!(record.qual(), Some(_)));
         let fastq = record.clone().to_fastq(b'I');
