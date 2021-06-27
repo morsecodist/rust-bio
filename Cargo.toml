@@ -67,3 +67,8 @@ features = ["stable_graph"]
 proptest = "1"
 tempfile = "3.1.0"
 rand = { version = "0.8", features = ["std_rng"] }
+criterion = "0.3"
+
+[[bench]]
+name = "fastx"
+harness = false
