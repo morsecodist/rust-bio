@@ -213,6 +213,38 @@ impl<R: io::Read> Reader<R> {
             error_has_occured: false,
         }
     }
+
+    pub (crate) fn read_inner(&mut self, id: &mut String, desc: &mut Option<String>, seq: &mut String) -> io::Result<()> {
+        id.clear();
+        std::mem::swap(desc, &mut None);
+        seq.clear();
+        if self.line.is_empty() {
+            self.reader.read_line(&mut self.line)?;
+            if self.line.is_empty() {
+                return Ok(());
+            }
+        }
+
+        if !self.line.starts_with('>') {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "Expected > at record start.",
+            ));
+        }
+        let mut header_fields = self.line[1..].trim_end().splitn(2, char::is_whitespace);
+        std::mem::swap(id, &mut header_fields.next().map(|s| s.to_owned()).unwrap());
+        std::mem::swap(desc, &mut header_fields.next().map(|s| s.to_owned()));
+        loop {
+            self.line.clear();
+            self.reader.read_line(&mut self.line)?;
+            if self.line.is_empty() || self.line.starts_with('>') {
+                break;
+            }
+            seq.push_str(self.line.trim_end());
+        }
+
+        Ok(())
+    }
 }
 
 impl<R> FastaRead for Reader<R>
@@ -255,33 +287,7 @@ where
     /// assert_eq!(record.seq().to_vec(), b"AAAA");
     /// ```
     fn read(&mut self, record: &mut Record) -> io::Result<()> {
-        record.clear();
-        if self.line.is_empty() {
-            self.reader.read_line(&mut self.line)?;
-            if self.line.is_empty() {
-                return Ok(());
-            }
-        }
-
-        if !self.line.starts_with('>') {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "Expected > at record start.",
-            ));
-        }
-        let mut header_fields = self.line[1..].trim_end().splitn(2, char::is_whitespace);
-        record.id = header_fields.next().map(|s| s.to_owned()).unwrap();
-        record.desc = header_fields.next().map(|s| s.to_owned());
-        loop {
-            self.line.clear();
-            self.reader.read_line(&mut self.line)?;
-            if self.line.is_empty() || self.line.starts_with('>') {
-                break;
-            }
-            record.seq.push_str(self.line.trim_end());
-        }
-
-        Ok(())
+        self.read_inner(&mut record.id, &mut record.desc, &mut record.seq)
     }
 }
 

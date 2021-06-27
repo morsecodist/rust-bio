@@ -187,6 +187,52 @@ impl<R: io::Read> Reader<R> {
     pub fn records(self) -> Records<R> {
         Records { reader: self }
     }
+
+    #[inline(always)]
+    pub (crate) fn read_inner(&mut self, id: &mut String, desc: &mut Option<String>, seq: &mut String, qual: &mut String) -> Result<()> {
+        id.clear();
+        std::mem::swap(desc, &mut None);
+        seq.clear();
+        qual.clear();
+
+        self.line_buffer.clear();
+
+        self.reader.read_line(&mut self.line_buffer)?;
+
+        if !self.line_buffer.is_empty() {
+            if !self.line_buffer.starts_with('@') {
+                return Err(Error::MissingAt);
+            }
+            let mut header_fields = self.line_buffer[1..].trim_end().splitn(2, ' ');
+            std::mem::swap(id, &mut header_fields.next().unwrap_or_default().to_owned());
+            std::mem::swap(desc, &mut header_fields.next().map(|s| s.to_owned()));
+            self.line_buffer.clear();
+
+            self.reader.read_line(&mut self.line_buffer)?;
+
+            let mut lines_read = 0;
+            while !self.line_buffer.is_empty() && !self.line_buffer.starts_with('+') {
+                seq.push_str(&self.line_buffer.trim_end());
+                self.line_buffer.clear();
+                self.reader.read_line(&mut self.line_buffer)?;
+                lines_read += 1;
+            }
+
+            for _ in 0..lines_read {
+                self.line_buffer.clear();
+                self.reader
+                    .read_line(&mut self.line_buffer)
+                    .map_err(Error::ReadError)?;
+                qual.push_str(self.line_buffer.trim_end());
+            }
+
+            if qual.is_empty() {
+                return Err(Error::IncompleteRecord);
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl<R> FastqRead for Reader<R>
@@ -232,44 +278,7 @@ where
     /// assert_eq!(record.qual().to_vec(), b"IIII");
     /// ```
     fn read(&mut self, record: &mut Record) -> Result<()> {
-        record.clear();
-        self.line_buffer.clear();
-
-        self.reader.read_line(&mut self.line_buffer)?;
-
-        if !self.line_buffer.is_empty() {
-            if !self.line_buffer.starts_with('@') {
-                return Err(Error::MissingAt);
-            }
-            let mut header_fields = self.line_buffer[1..].trim_end().splitn(2, ' ');
-            record.id = header_fields.next().unwrap_or_default().to_owned();
-            record.desc = header_fields.next().map(|s| s.to_owned());
-            self.line_buffer.clear();
-
-            self.reader.read_line(&mut self.line_buffer)?;
-
-            let mut lines_read = 0;
-            while !self.line_buffer.is_empty() && !self.line_buffer.starts_with('+') {
-                record.seq.push_str(&self.line_buffer.trim_end());
-                self.line_buffer.clear();
-                self.reader.read_line(&mut self.line_buffer)?;
-                lines_read += 1;
-            }
-
-            for _ in 0..lines_read {
-                self.line_buffer.clear();
-                self.reader
-                    .read_line(&mut self.line_buffer)
-                    .map_err(Error::ReadError)?;
-                record.qual.push_str(self.line_buffer.trim_end());
-            }
-
-            if record.qual.is_empty() {
-                return Err(Error::IncompleteRecord);
-            }
-        }
-
-        Ok(())
+        self.read_inner(&mut record.id, &mut record.desc, &mut record.seq, &mut record.qual)
     }
 }
 

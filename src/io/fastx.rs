@@ -239,6 +239,15 @@ pub struct EitherRecord {
 }
 
 impl EitherRecord {
+    pub fn new() -> Self {
+        EitherRecord {
+            id: String::new(),
+            desc: None,
+            seq: String::new(),
+            qual: None,
+        }
+    }
+
     pub fn with_attrs(id: &str, desc: Option<&str>, seq: TextSlice<'_>, qual: Option<&[u8]>) -> Self {
         let desc = match desc {
             Some(desc) => Some(desc.to_owned()),
@@ -356,8 +365,8 @@ impl<T: Read> Records<EitherRecord, Error> for EitherRecords<T> {}
 
 #[derive(Debug)]
 enum EitherRecordsInner<R: Read> {
-    FASTA(fasta::Records<R>),
-    FASTQ(fastq::Records<R>),
+    FASTA(fasta::Reader<R>),
+    FASTQ(fastq::Reader<R>),
 }
 
 #[derive(Debug)]
@@ -399,12 +408,12 @@ impl<R: Read> EitherRecords<R> {
                 Err(err) => return Err(err),
                 Ok((reader, Kind::FASTA)) => {
                     self.records = Some(EitherRecordsInner::FASTA(
-                        fasta::Reader::new(reader).records(),
+                        fasta::Reader::new(reader),
                     ))
                 }
                 Ok((reader, Kind::FASTQ)) => {
                     self.records = Some(EitherRecordsInner::FASTQ(
-                        fastq::Reader::new(reader).records(),
+                        fastq::Reader::new(reader),
                     ))
                 }
             }
@@ -419,14 +428,26 @@ impl<R: Read> Iterator for EitherRecords<R> {
         if let Err(e) = self.initialize() {
             return Some(Err(Error::IO(e)));
         }
-        match &mut self.records {
-            Some(EitherRecordsInner::FASTA(r)) => r
-                .next()
-                .map(|record_res| record_res.map(EitherRecord::from).map_err(Error::IO)),
-            Some(EitherRecordsInner::FASTQ(r)) => r
-                .next()
-                .map(|record_res| record_res.map(EitherRecord::from).map_err(Error::FASTQ)),
+        let mut record = EitherRecord::new();
+        let res = match &mut self.records {
+            Some(EitherRecordsInner::FASTA(r)) => Some(r.read_inner(&mut record.id, &mut record.desc, &mut record.seq).map_err(Error::from)),
+            Some(EitherRecordsInner::FASTQ(r)) => {
+                let mut qual = String::new();
+                let res = r.read_inner(&mut record.id, &mut record.desc, &mut record.seq, &mut qual);
+                record.qual = Some(qual);
+                Some(res.map_err(Error::from))
+            },
             None => None,
+        };
+        match res {
+            Some(Ok(())) if record.is_empty() => None,
+            Some(Ok(())) => Some(Ok(record)),
+            Some(Err(err)) => {
+                // TODO
+                // self.error_has_occured = true;
+                Some(Err(err))
+            },
+            None => None
         }
     }
 }

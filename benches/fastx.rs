@@ -14,9 +14,9 @@ const BASES: &[u8] = b"ACTG";
 const ID_LEN: usize = 10;
 const DESC_LEN: usize = 20;
 const SEQ_LEN: usize = 100;
-const FASTA_SIZE: usize = 100;
+const FASTA_SIZE: usize = 1000;
 
-const ITERS: usize = 4000;
+const ITERS: usize = 10000;
 
 fn gen_random_fasta() -> io::Result<Vec<u8>> {
     let mut raw_writer = Vec::new();
